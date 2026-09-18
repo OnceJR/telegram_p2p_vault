@@ -159,16 +159,19 @@
     });
 
     window.shareTransferLink = () => {
-      const botUser = window.TELEGRAM_BOT_USERNAME || "TuBotUsername";
-      const shareUrl = `https://t.me/${botUser}?startapp=${roomId}`;
-      const shareText = `🔒 Te envié un archivo directo por WebRTC P2P. Ábrelo aquí:`;
-      if (tg && tg.openTelegramLink) {
-        tg.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(shareUrl)}&text=${encodeURIComponent(shareText)}`);
-      } else {
-        navigator.clipboard.writeText(shareUrl);
-        alert('Enlace copiado al portapapeles: ' + shareUrl);
-      }
-    };
+  // Reemplaza "TuBotUsername" por el nombre real de tu bot:
+  const botUser = "miniapptgexcbot"; 
+  
+  const shareUrl = `https://t.me/${botUser}?startapp=${roomId}`;
+  const shareText = `🔒 Te envié un archivo directo por WebRTC P2P. Ábrelo aquí:`;
+  
+  if (tg && tg.openTelegramLink) {
+    tg.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(shareUrl)}&text=${encodeURIComponent(shareText)}`);
+  } else {
+    navigator.clipboard.writeText(shareUrl);
+    alert('Enlace copiado al portapapeles: ' + shareUrl);
+  }
+};
 
     function showReceivedMedia(blob, meta) {
       const container = document.getElementById('mediaContainer');
