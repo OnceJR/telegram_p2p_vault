@@ -1,38 +1,43 @@
 import { saveMedia, getMedia } from './indexedDB.js';
 
-const CHUNK_SIZE = 16384; // 16 KB
-const BUFFER_CEILING = 64 * 1024; // 64 KB de backpressure
+const CHUNK_SIZE = 16384;
+const BUFFER_CEILING = 64 * 1024;
 
 export class P2PTransport {
-  constructor(roomId, callbacks) {
-    this.roomId = roomId;
-    this.onStatus = callbacks.onStatus || (() => {});
-    this.onProgress = callbacks.onProgress || (() => {});
-    this.onReceived = callbacks.onReceived || (() => {});
-    this.onReadyToSend = callbacks.onReadyToSend || (() => {});
+  constructor(callbacks) {
+    this.roomId = null;
+    this.callbacks = callbacks;
 
     this.pc = null;
     this.dc = null;
     this.ws = null;
     this.targetPeerId = null;
+    this.iceCandidateQueue = [];
 
     this.incomingMeta = null;
     this.receivedChunks = [];
     this.receivedSize = 0;
+    this.userSeed = Math.random().toString(36).substring(2, 9);
   }
 
   isChannelReady() {
     return this.dc && this.dc.readyState === 'open';
   }
 
-  connect(wsUrl) {
+  connectSignaling(wsUrl, roomId) {
+    this.roomId = roomId.trim().toUpperCase();
+    if (this.ws) {
+      this.ws.close();
+    }
+
     this.ws = new WebSocket(wsUrl);
 
     this.ws.onopen = () => {
-      this.onStatus('Esperando par en la sala...', false);
+      this.callbacks.onStatus?.('Conectando a la sala...', false);
       this.ws.send(JSON.stringify({
         action: 'join',
         room_id: this.roomId,
+        user_seed: this.userSeed,
         init_data: window.Telegram?.WebApp?.initData || ''
       }));
     };
@@ -40,26 +45,30 @@ export class P2PTransport {
     this.ws.onmessage = async (event) => {
       const msg = JSON.parse(event.data);
 
-      if (msg.type === 'peer_joined') {
+      if (msg.type === 'joined_success') {
+        this.callbacks.onRoomJoined?.(msg.room_id);
+      } else if (msg.type === 'peer_joined') {
         this.targetPeerId = msg.peer_id;
-        this.onStatus('Par detectado. Negociando WebRTC...', false);
+        this.callbacks.onStatus?.('Par encontrado. Negociando WebRTC...', false);
         this.initPeer(msg.initiator);
       } else if (msg.type === 'offer') {
         await this.handleOffer(msg.data, msg.sender_id);
       } else if (msg.type === 'answer') {
-        await this.pc.setRemoteDescription(new RTCSessionDescription(msg.data));
-      } else if (msg.type === 'candidate' && this.pc) {
-        await this.pc.addIceCandidate(new RTCIceCandidate(msg.data));
+        await this.handleAnswer(msg.data);
+      } else if (msg.type === 'candidate') {
+        await this.handleCandidate(msg.data);
       } else if (msg.type === 'peer_left') {
-        this.onStatus('El par se ha desconectado.', false);
-        this.cleanupPC();
+        this.callbacks.onStatus?.('El otro dispositivo se desconectó.', false);
+        this.cleanup();
       }
     };
 
-    this.ws.onclose = () => this.onStatus('Desconectado', false);
+    this.ws.onclose = () => this.callbacks.onStatus?.('Desconectado de señalización.', false);
   }
 
   initPeer(isInitiator) {
+    this.cleanupPeerConnection();
+
     this.pc = new RTCPeerConnection({
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
@@ -68,7 +77,7 @@ export class P2PTransport {
     });
 
     this.pc.onicecandidate = (e) => {
-      if (e.candidate) {
+      if (e.candidate && this.ws?.readyState === WebSocket.OPEN) {
         this.ws.send(JSON.stringify({
           action: 'candidate',
           target_id: this.targetPeerId,
@@ -78,8 +87,8 @@ export class P2PTransport {
     };
 
     if (isInitiator) {
-      this.dc = this.pc.createDataChannel('p2p_channel', { ordered: true });
-      this.bindDataChannel(this.dc);
+      this.dc = this.pc.createDataChannel('p2p_transfer', { ordered: true });
+      this.setupDataChannel(this.dc);
 
       this.pc.createOffer()
         .then((offer) => this.pc.setLocalDescription(offer))
@@ -93,7 +102,7 @@ export class P2PTransport {
     } else {
       this.pc.ondatachannel = (e) => {
         this.dc = e.channel;
-        this.bindDataChannel(this.dc);
+        this.setupDataChannel(this.dc);
       };
     }
   }
@@ -102,6 +111,8 @@ export class P2PTransport {
     this.targetPeerId = senderId;
     this.initPeer(false);
     await this.pc.setRemoteDescription(new RTCSessionDescription(offerData));
+    await this.processIceQueue();
+
     const answer = await this.pc.createAnswer();
     await this.pc.setLocalDescription(answer);
 
@@ -112,16 +123,41 @@ export class P2PTransport {
     }));
   }
 
-  bindDataChannel(dc) {
+  async handleAnswer(answerData) {
+    await this.pc.setRemoteDescription(new RTCSessionDescription(answerData));
+    await this.processIceQueue();
+  }
+
+  async handleCandidate(candidateData) {
+    const candidate = new RTCIceCandidate(candidateData);
+    if (!this.pc || !this.pc.remoteDescription) {
+      this.iceCandidateQueue.push(candidate);
+    } else {
+      await this.pc.addIceCandidate(candidate);
+    }
+  }
+
+  async processIceQueue() {
+    while (this.iceCandidateQueue.length > 0) {
+      const candidate = this.iceCandidateQueue.shift();
+      try {
+        await this.pc.addIceCandidate(candidate);
+      } catch (err) {
+        console.error('Error aplicando ICE candidate de cola:', err);
+      }
+    }
+  }
+
+  setupDataChannel(dc) {
     dc.binaryType = 'arraybuffer';
     dc.bufferedAmountLowThreshold = BUFFER_CEILING;
 
     dc.onopen = () => {
-      this.onStatus('P2P Conectado', true);
-      this.onReadyToSend();
+      this.callbacks.onStatus?.('⚡ Conectado directo P2P', true);
+      this.callbacks.onChannelReady?.();
     };
 
-    dc.onclose = () => this.onStatus('Canal P2P cerrado', false);
+    dc.onclose = () => this.callbacks.onStatus?.('Canal directo cerrado.', false);
 
     dc.onmessage = async (e) => {
       if (typeof e.data === 'string') {
@@ -130,12 +166,11 @@ export class P2PTransport {
           this.incomingMeta = payload.meta;
           this.receivedChunks = [];
           this.receivedSize = 0;
-          this.onStatus(`Recibiendo: ${payload.meta.name}`, true);
+          this.callbacks.onStatus?.(`Recibiendo: ${payload.meta.name}...`, true);
         } else if (payload.event === 'COMPLETE') {
-          const completeBlob = new Blob(this.receivedChunks, { type: this.incomingMeta.type });
-          await saveMedia(this.incomingMeta.id, completeBlob, this.incomingMeta);
+          const blob = new Blob(this.receivedChunks, { type: this.incomingMeta.type });
+          await saveMedia(this.incomingMeta.id, blob, this.incomingMeta);
 
-          // Notificar al backend para reputación
           fetch('/api/transfer-complete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -146,14 +181,14 @@ export class P2PTransport {
             })
           });
 
-          this.onReceived(completeBlob, this.incomingMeta);
-          this.onStatus('Completado', true);
+          this.callbacks.onReceived?.(blob, this.incomingMeta);
+          this.callbacks.onStatus?.('✅ Archivo recibido correctamente', true);
         }
       } else {
         this.receivedChunks.push(e.data);
         this.receivedSize += e.data.byteLength;
         if (this.incomingMeta?.size) {
-          this.onProgress((this.receivedSize / this.incomingMeta.size) * 100);
+          this.callbacks.onProgress?.((this.receivedSize / this.incomingMeta.size) * 100);
         }
       }
     };
@@ -163,14 +198,10 @@ export class P2PTransport {
     const record = await getMedia(fileId);
     if (!record || !this.isChannelReady()) return;
 
-    const meta = {
-      id: record.id,
-      name: record.name,
-      type: record.type,
-      size: record.size
-    };
-
-    this.dc.send(JSON.stringify({ event: 'START', meta }));
+    this.dc.send(JSON.stringify({
+      event: 'START',
+      meta: { id: record.id, name: record.name, type: record.type, size: record.size }
+    }));
 
     const buffer = await record.blob.arrayBuffer();
     let offset = 0;
@@ -188,20 +219,23 @@ export class P2PTransport {
         const chunk = buffer.slice(offset, offset + CHUNK_SIZE);
         this.dc.send(chunk);
         offset += chunk.byteLength;
-        this.onProgress((offset / buffer.byteLength) * 100);
+        this.callbacks.onProgress?.((offset / buffer.byteLength) * 100);
       }
 
       this.dc.send(JSON.stringify({ event: 'COMPLETE' }));
-      this.onStatus('Enviado con éxito', true);
+      this.callbacks.onStatus?.('✅ Archivo enviado con éxito', true);
     };
 
     pump();
   }
 
-  cleanupPC() {
-    if (this.dc) this.dc.close();
-    if (this.pc) this.pc.close();
-    this.dc = null;
-    this.pc = null;
+  cleanupPeerConnection() {
+    if (this.dc) { try { this.dc.close(); } catch(e) {} this.dc = null; }
+    if (this.pc) { try { this.pc.close(); } catch(e) {} this.pc = null; }
+    this.iceCandidateQueue = [];
+  }
+
+  cleanup() {
+    this.cleanupPeerConnection();
   }
 }
