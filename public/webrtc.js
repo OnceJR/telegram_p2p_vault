@@ -1,7 +1,5 @@
-import { saveMedia, getMedia } from './indexedDB.js';
-
-const CHUNK_SIZE = 16384;
-const BUFFER_CEILING = 64 * 1024;
+const CHUNK_SIZE = 16384; // 16 KB (tamaño estándar SCTP)
+const BUFFER_CEILING = 1024 * 1024; // 1 MB backpressure threshold
 
 export class P2PTransport {
   constructor(callbacks) {
@@ -14,10 +12,14 @@ export class P2PTransport {
     this.targetPeerId = null;
     this.iceCandidateQueue = [];
 
-    this.incomingMeta = null;
-    this.receivedChunks = [];
-    this.receivedSize = 0;
     this.userSeed = Math.random().toString(36).substring(2, 9);
+
+    // Sistema de escritura en streaming
+    this.incomingMeta = null;
+    this.opfsFileHandle = null;
+    this.opfsWritable = null;
+    this.receivedBytes = 0;
+    this.fallbackChunks = [];
   }
 
   isChannelReady() {
@@ -49,7 +51,7 @@ export class P2PTransport {
         this.callbacks.onRoomJoined?.(msg.room_id);
       } else if (msg.type === 'peer_joined') {
         this.targetPeerId = msg.peer_id;
-        this.callbacks.onStatus?.('Par encontrado. Negociando WebRTC...', false);
+        this.callbacks.onStatus?.('Dispositivo detectado. Negociando conexión...', false);
         this.initPeer(msg.initiator);
       } else if (msg.type === 'offer') {
         await this.handleOffer(msg.data, msg.sender_id);
@@ -58,7 +60,7 @@ export class P2PTransport {
       } else if (msg.type === 'candidate') {
         await this.handleCandidate(msg.data);
       } else if (msg.type === 'peer_left') {
-        this.callbacks.onStatus?.('El otro dispositivo se desconectó.', false);
+        this.callbacks.onStatus?.('El otro dispositivo se ha desconectado.', false);
         this.cleanup();
       }
     };
@@ -87,7 +89,7 @@ export class P2PTransport {
     };
 
     if (isInitiator) {
-      this.dc = this.pc.createDataChannel('p2p_transfer', { ordered: true });
+      this.dc = this.pc.createDataChannel('p2p_channel', { ordered: true });
       this.setupDataChannel(this.dc);
 
       this.pc.createOffer()
@@ -139,21 +141,21 @@ export class P2PTransport {
 
   async processIceQueue() {
     while (this.iceCandidateQueue.length > 0) {
-      const candidate = this.iceCandidateQueue.shift();
+      const cand = this.iceCandidateQueue.shift();
       try {
-        await this.pc.addIceCandidate(candidate);
-      } catch (err) {
-        console.error('Error aplicando ICE candidate de cola:', err);
+        await this.pc.addIceCandidate(cand);
+      } catch (e) {
+        console.error('Error aplicando ICE candidate:', e);
       }
     }
   }
 
   setupDataChannel(dc) {
     dc.binaryType = 'arraybuffer';
-    dc.bufferedAmountLowThreshold = BUFFER_CEILING;
+    dc.bufferedAmountLowThreshold = BUFFER_CEILING / 2;
 
     dc.onopen = () => {
-      this.callbacks.onStatus?.('⚡ Conectado directo P2P', true);
+      this.callbacks.onStatus?.('⚡ Enlace P2P Directo Establecido', true);
       this.callbacks.onChannelReady?.();
     };
 
@@ -162,15 +164,39 @@ export class P2PTransport {
     dc.onmessage = async (e) => {
       if (typeof e.data === 'string') {
         const payload = JSON.parse(e.data);
+
         if (payload.event === 'START') {
           this.incomingMeta = payload.meta;
-          this.receivedChunks = [];
-          this.receivedSize = 0;
-          this.callbacks.onStatus?.(`Recibiendo: ${payload.meta.name}...`, true);
-        } else if (payload.event === 'COMPLETE') {
-          const blob = new Blob(this.receivedChunks, { type: this.incomingMeta.type });
-          await saveMedia(this.incomingMeta.id, blob, this.incomingMeta);
+          this.receivedBytes = 0;
+          this.fallbackChunks = [];
 
+          // Inicializar escritura en disco mediante OPFS para uso mínimo de RAM
+          if (navigator.storage && navigator.storage.getDirectory) {
+            try {
+              const root = await navigator.storage.getDirectory();
+              this.opfsFileHandle = await root.getFileHandle(`recv_${this.incomingMeta.id}.tmp`, { create: true });
+              this.opfsWritable = await this.opfsFileHandle.createWritable();
+            } catch (err) {
+              console.warn('OPFS no disponible, usando fallback en memoria:', err);
+              this.opfsWritable = null;
+            }
+          }
+
+          this.callbacks.onStatus?.(`Recibiendo: ${payload.meta.name}`, true);
+        } else if (payload.event === 'COMPLETE') {
+          let finalFile = null;
+
+          if (this.opfsWritable) {
+            await this.opfsWritable.close();
+            const diskFile = await this.opfsFileHandle.getFile();
+            finalFile = new File([diskFile], this.incomingMeta.name, { type: this.incomingMeta.type });
+          } else {
+            const blob = new Blob(this.fallbackChunks, { type: this.incomingMeta.type });
+            finalFile = new File([blob], this.incomingMeta.name, { type: this.incomingMeta.type });
+            this.fallbackChunks = [];
+          }
+
+          // Notificar reputación al backend
           fetch('/api/transfer-complete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -179,35 +205,46 @@ export class P2PTransport {
               sender_id: this.targetPeerId,
               file_id: this.incomingMeta.id
             })
-          });
+          }).catch(() => {});
 
-          this.callbacks.onReceived?.(blob, this.incomingMeta);
-          this.callbacks.onStatus?.('✅ Archivo recibido correctamente', true);
+          this.callbacks.onReceived?.(finalFile, this.incomingMeta);
+          this.callbacks.onStatus?.('✅ Transferencia Completa', true);
         }
       } else {
-        this.receivedChunks.push(e.data);
-        this.receivedSize += e.data.byteLength;
+        // Recepción del fragmento binario
+        if (this.opfsWritable) {
+          await this.opfsWritable.write(e.data);
+        } else {
+          this.fallbackChunks.push(e.data);
+        }
+
+        this.receivedBytes += e.data.byteLength;
         if (this.incomingMeta?.size) {
-          this.callbacks.onProgress?.((this.receivedSize / this.incomingMeta.size) * 100);
+          this.callbacks.onProgress?.((this.receivedBytes / this.incomingMeta.size) * 100);
         }
       }
     };
   }
 
-  async sendFile(fileId) {
-    const record = await getMedia(fileId);
-    if (!record || !this.isChannelReady()) return;
+  // Envío en streaming: Lectura fraccionada con slice() para archivos de cualquier tamaño
+  async sendFileStream(file, onProgress) {
+    if (!this.isChannelReady()) return;
 
-    this.dc.send(JSON.stringify({
-      event: 'START',
-      meta: { id: record.id, name: record.name, type: record.type, size: record.size }
-    }));
+    const meta = {
+      id: crypto.randomUUID(),
+      name: file.name,
+      type: file.type || 'application/octet-stream',
+      size: file.size
+    };
 
-    const buffer = await record.blob.arrayBuffer();
+    this.dc.send(JSON.stringify({ event: 'START', meta }));
+
     let offset = 0;
+    const totalSize = file.size;
 
-    const pump = () => {
-      while (offset < buffer.byteLength) {
+    const pump = async () => {
+      while (offset < totalSize) {
+        // Control de flujo: si el buffer está lleno, pausar y esperar evento
         if (this.dc.bufferedAmount > BUFFER_CEILING) {
           this.dc.onbufferedamountlow = () => {
             this.dc.onbufferedamountlow = null;
@@ -216,22 +253,26 @@ export class P2PTransport {
           return;
         }
 
-        const chunk = buffer.slice(offset, offset + CHUNK_SIZE);
-        this.dc.send(chunk);
-        offset += chunk.byteLength;
-        this.callbacks.onProgress?.((offset / buffer.byteLength) * 100);
+        // Cortar y leer únicamente 16 KB en RAM por iteración
+        const slice = file.slice(offset, offset + CHUNK_SIZE);
+        const chunkBuffer = await slice.arrayBuffer();
+
+        this.dc.send(chunkBuffer);
+        offset += chunkBuffer.byteLength;
+
+        onProgress?.((offset / totalSize) * 100);
       }
 
       this.dc.send(JSON.stringify({ event: 'COMPLETE' }));
       this.callbacks.onStatus?.('✅ Archivo enviado con éxito', true);
     };
 
-    pump();
+    await pump();
   }
 
   cleanupPeerConnection() {
-    if (this.dc) { try { this.dc.close(); } catch(e) {} this.dc = null; }
-    if (this.pc) { try { this.pc.close(); } catch(e) {} this.pc = null; }
+    if (this.dc) { try { this.dc.close(); } catch (e) {} this.dc = null; }
+    if (this.pc) { try { this.pc.close(); } catch (e) {} this.pc = null; }
     this.iceCandidateQueue = [];
   }
 
