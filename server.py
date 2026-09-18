@@ -172,17 +172,26 @@ async def on_cleanup(app: web.Application):
     mongo_client.close()
 
 
+async def index_handler(request: web.Request) -> web.FileResponse:
+    """Sirve directamente el archivo HTML principal al entrar a la raíz."""
+    return web.FileResponse("./public/index.html")
+
+
 def create_app() -> web.Application:
     app = web.Application()
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
 
-    # Rutas API y WebSockets
+    # 1. Rutas API y WebSockets
     app.router.add_get("/ws/signal", websocket_handler)
     app.router.add_post("/api/transfer-complete", handle_transfer_complete)
 
-    # Servir Frontend
-    app.router.add_static("/", path="./public", name="public", show_index=True)
+    # 2. Servir index.html de forma explícita en la raíz "/" (Debe ir ANTES de add_static)
+    app.router.add_get("/", index_handler)
+
+    # 3. Servir el resto de archivos estáticos (JS, CSS, etc.) sin listar carpetas
+    app.router.add_static("/", path="./public", name="public", show_index=False)
+    
     return app
 
 
