@@ -3,18 +3,22 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>P2P Vault</title>
+  <title>Bóveda P2P Segura</title>
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root {
-      --bg: var(--tg-theme-bg-color, #0a0e17);
-      --text: var(--tg-theme-text-color, #f1f5f9);
-      --btn-bg: var(--tg-theme-button-color, #0284c7);
+      --bg: var(--tg-theme-bg-color, #0b111e);
+      --secondary-bg: var(--tg-theme-secondary-bg-color, #151f32);
+      --text: var(--tg-theme-text-color, #f8fafc);
+      --hint: var(--tg-theme-hint-color, #94a3b8);
+      --btn-bg: var(--tg-theme-button-color, #2563eb);
       --btn-text: var(--tg-theme-button-text-color, #ffffff);
-      --glass: rgba(255, 255, 255, 0.05);
-      --glass-border: rgba(255, 255, 255, 0.12);
+      --success: #10b981;
+      --warning: #f59e0b;
+      --glass: rgba(255, 255, 255, 0.04);
+      --border: rgba(255, 255, 255, 0.1);
     }
-    * { box-sizing: border-box; }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     body {
       margin: 0;
       padding: 16px;
@@ -26,87 +30,167 @@
       height: 100vh;
       overflow-y: auto;
     }
-    .card {
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 20px;
+    }
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
       background: var(--glass);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
-      border: 1px solid var(--glass-border);
+      border: 1px solid var(--border);
+    }
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--warning);
+      box-shadow: 0 0 8px var(--warning);
+    }
+    .dot.connected { background: var(--success); box-shadow: 0 0 8px var(--success); }
+    .card {
+      background: var(--secondary-bg);
+      border: 1px solid var(--border);
       border-radius: 20px;
       padding: 20px;
       margin-bottom: 16px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.25);
+    }
+    .room-tag {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px dashed var(--border);
+      border-radius: 10px;
+      padding: 8px 12px;
+      font-family: monospace;
+      font-size: 13px;
+      color: var(--hint);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin: 12px 0;
     }
     .btn {
       width: 100%;
+      padding: 15px;
+      border-radius: 14px;
+      border: none;
       background: var(--btn-bg);
       color: var(--btn-text);
-      border: none;
-      padding: 14px;
-      border-radius: 12px;
       font-size: 15px;
       font-weight: 600;
       cursor: pointer;
-      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: transform 0.1s ease, opacity 0.2s ease;
     }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .btn-secondary { background: rgba(255, 255, 255, 0.15); }
-    .progress-track {
-      background: rgba(255, 255, 255, 0.08);
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn-secondary { background: rgba(255, 255, 255, 0.08); color: var(--text); }
+    .btn-success { background: var(--success); }
+    .progress-container {
+      margin: 20px 0 10px 0;
+      display: none;
+    }
+    .progress-bar {
       height: 8px;
+      background: rgba(255, 255, 255, 0.08);
       border-radius: 4px;
-      margin: 16px 0;
       overflow: hidden;
     }
     .progress-fill {
-      background: var(--btn-bg);
       height: 100%;
       width: 0%;
+      background: var(--btn-bg);
+      border-radius: 4px;
       transition: width 0.15s ease-out;
     }
-    .status-text {
-      font-size: 13px;
-      opacity: 0.8;
-      text-align: center;
-      margin: 4px 0;
-    }
-    #mediaViewer {
-      margin-top: 16px;
-      text-align: center;
+    .media-card {
       display: none;
+      text-align: center;
     }
-    #mediaViewer img, #mediaViewer video {
+    .media-card img, .media-card video {
       max-width: 100%;
-      border-radius: 12px;
-      border: 1px solid var(--glass-border);
+      border-radius: 14px;
+      margin-bottom: 12px;
+      border: 1px solid var(--border);
     }
   </style>
 </head>
 <body>
 
-  <div class="card">
-    <h3 style="margin-top:0;">Transferencia P2P</h3>
-    <p style="font-size: 13px; opacity: 0.7;">
-      Los archivos se leen y transmiten directamente desde tu dispositivo mediante WebRTC encriptado.
-    </p>
-
-    <input type="file" id="filePicker" style="display:none;" />
-    <button class="btn" id="btnUpload" onclick="document.getElementById('filePicker').click()">
-      1. Cargar Archivo Local
-    </button>
-    
-    <button class="btn btn-secondary" id="btnShare" style="display:none;" onclick="shareTransferLink()">
-      2. Compartir Enlace a Receptor
-    </button>
-
-    <div class="progress-track">
-      <div class="progress-fill" id="progressFill"></div>
+  <div class="header">
+    <div style="font-weight: 700; font-size: 18px;">P2P Vault</div>
+    <div class="status-badge" id="statusBadge">
+      <div class="dot" id="statusDot"></div>
+      <span id="statusText">Iniciando...</span>
     </div>
-    <div class="status-text" id="statusLabel">Inicializando...</div>
   </div>
 
-  <div class="card" id="mediaViewer">
-    <h4>Archivo Recibido</h4>
-    <div id="mediaContainer"></div>
-    <button class="btn" id="btnDownload" style="margin-top: 12px;">Descargar a Dispositivo</button>
+  <!-- Vista Emisor -->
+  <div class="card" id="senderSection">
+    <h3 style="margin-top:0;">Enviar Multimedia</h3>
+    <p style="font-size: 13px; color: var(--hint); margin: 0;">
+      Selecciona una foto o video. El archivo no se subirá a servidores: se enviará directo a tu par.
+    </p>
+
+    <div class="room-tag">
+      <span>Sala: <b id="senderRoomLabel">...</b></span>
+    </div>
+
+    <input type="file" id="fileInput" style="display:none;" />
+    <button class="btn" id="btnPickFile" onclick="document.getElementById('fileInput').click()">
+      📁 Seleccionar Archivo
+    </button>
+
+    <div id="fileInfoBox" style="display: none; margin-top: 14px; font-size: 13px;">
+      <div style="padding: 10px; background: rgba(255,255,255,0.03); border-radius: 10px; border: 1px solid var(--border);">
+        📄 <b id="fileName">-</b> (<span id="fileSize">0 KB</span>)
+      </div>
+      <button class="btn btn-secondary" id="btnShareLink" style="margin-top: 10px;" onclick="shareDirectLink()">
+        🔗 Compartir Enlace al Receptor
+      </button>
+    </div>
+  </div>
+
+  <!-- Vista Receptor -->
+  <div class="card" id="receiverSection" style="display: none;">
+    <h3 style="margin-top:0;">Recibir Archivo</h3>
+    <p style="font-size: 13px; color: var(--hint); margin: 0;">
+      Te has unido a una sala de recepción directa cifrada.
+    </p>
+    <div class="room-tag">
+      <span>Sala activa: <b id="receiverRoomLabel">...</b></span>
+    </div>
+    <div id="receiverWaitingMsg" style="font-size: 13px; color: var(--warning); text-align: center; padding: 12px 0;">
+      🟡 Esperando que el emisor comience el flujo...
+    </div>
+  </div>
+
+  <!-- Progreso de Transferencia Común -->
+  <div class="card progress-container" id="progressBox">
+    <div style="display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 6px;">
+      <span id="progressTitle">Transfiriendo datos...</span>
+      <b id="progressPercent">0%</b>
+    </div>
+    <div class="progress-bar">
+      <div class="progress-fill" id="progressFill"></div>
+    </div>
+  </div>
+
+  <!-- Contenedor del Archivo Recibido -->
+  <div class="card media-card" id="mediaSection">
+    <h4 style="margin-top: 0; color: var(--success);">✅ Transferencia Finalizada</h4>
+    <div id="mediaViewer"></div>
+    <button class="btn btn-success" id="btnDownload">💾 Guardar en Dispositivo</button>
   </div>
 
   <script type="module">
@@ -119,87 +203,128 @@
       tg.expand();
     }
 
+    // Configuración del username real de tu bot
+    const BOT_USERNAME = "miniapptgexcbot";
+
     const urlParams = new URLSearchParams(window.location.search);
-    let roomId = tg?.initDataUnsafe?.start_param || urlParams.get('tgWebAppStartParam') || urlParams.get('room');
+    const startParam = tg?.initDataUnsafe?.start_param || urlParams.get('tgWebAppStartParam') || urlParams.get('room');
 
-    if (!roomId) {
-      roomId = 'room_' + crypto.randomUUID().slice(0, 8);
-      history.replaceState(null, '', `?room=${roomId}`);
-    }
+    const isReceiver = Boolean(startParam);
+    const roomId = isReceiver ? startParam : 'room_' + crypto.randomUUID().slice(0, 8);
 
+    // Elementos DOM
+    const senderSection = document.getElementById('senderSection');
+    const receiverSection = document.getElementById('receiverSection');
+    const senderRoomLabel = document.getElementById('senderRoomLabel');
+    const receiverRoomLabel = document.getElementById('receiverRoomLabel');
+    const statusText = document.getElementById('statusText');
+    const statusDot = document.getElementById('statusDot');
+    const progressBox = document.getElementById('progressBox');
     const progressFill = document.getElementById('progressFill');
-    const statusLabel = document.getElementById('statusLabel');
-    const btnShare = document.getElementById('btnShare');
+    const progressPercent = document.getElementById('progressPercent');
+    const mediaSection = document.getElementById('mediaSection');
+    const mediaViewer = document.getElementById('mediaViewer');
+    const btnDownload = document.getElementById('btnDownload');
+    const fileInfoBox = document.getElementById('fileInfoBox');
+
     let loadedFileId = null;
 
+    // Adaptar vista según el rol
+    if (isReceiver) {
+      senderSection.style.display = 'none';
+      receiverSection.style.display = 'block';
+      receiverRoomLabel.innerText = roomId;
+    } else {
+      senderRoomLabel.innerText = roomId;
+    }
+
+    // Instancia WebRTC
     const p2p = new P2PTransport(roomId, {
-      onStatus: (msg) => { statusLabel.innerText = msg; },
-      onProgress: (pct) => { progressFill.style.width = `${pct}%`; },
+      onStatus: (msg, isConnected) => {
+        statusText.innerText = msg;
+        if (isConnected) {
+          statusDot.classList.add('connected');
+          if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
+        } else {
+          statusDot.classList.remove('connected');
+        }
+      },
+      onProgress: (pct) => {
+        progressBox.style.display = 'block';
+        progressFill.style.width = `${pct}%`;
+        progressPercent.innerText = `${pct.toFixed(0)}%`;
+      },
+      onReadyToSend: () => {
+        // En cuanto el canal está listo, si ya cargó un archivo, transmitir de inmediato
+        if (loadedFileId && !isReceiver) {
+          p2p.sendFile(loadedFileId);
+        }
+      },
       onReceived: (blob, meta) => {
-        showReceivedMedia(blob, meta);
+        progressBox.style.display = 'none';
+        if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
+        renderReceivedMedia(blob, meta);
       }
     });
 
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    p2p.connect(`${proto}//${window.location.host}/ws/signal`);
+    // Conectar WebSocket
+    const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    p2p.connect(`${wsProto}//${window.location.host}/ws/signal`);
 
-    document.getElementById('filePicker').addEventListener('change', async (e) => {
+    // Gestión del archivo en el Emisor
+    document.getElementById('fileInput').addEventListener('change', async (e) => {
       const file = e.target.files[0];
       if (!file) return;
 
       loadedFileId = crypto.randomUUID();
       await saveMedia(loadedFileId, file, { name: file.name, type: file.type, size: file.size });
 
-      statusLabel.innerText = `Cargado localmente: ${file.name}`;
-      btnShare.style.display = 'block';
+      document.getElementById('fileName').innerText = file.name;
+      document.getElementById('fileSize').innerText = `${(file.size / 1024).toFixed(1)} KB`;
+      fileInfoBox.style.display = 'block';
 
-      if (p2p.dc && p2p.dc.readyState === 'open') {
+      if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
+
+      // Si el par ya estaba dentro de la sala, iniciar envío de inmediato
+      if (p2p.isChannelReady()) {
         p2p.sendFile(loadedFileId);
       }
     });
 
-    window.shareTransferLink = () => {
-  // Reemplaza "TuBotUsername" por el nombre real de tu bot:
-  const botUser = "miniapptgexcbot"; 
-  
-  const shareUrl = `https://t.me/${botUser}?startapp=${roomId}`;
-  const shareText = `🔒 Te envié un archivo directo por WebRTC P2P. Ábrelo aquí:`;
-  
-  if (tg && tg.openTelegramLink) {
-    tg.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(shareUrl)}&text=${encodeURIComponent(shareText)}`);
-  } else {
-    navigator.clipboard.writeText(shareUrl);
-    alert('Enlace copiado al portapapeles: ' + shareUrl);
-  }
-};
+    window.shareDirectLink = () => {
+      const shareUrl = `https://t.me/${BOT_USERNAME}?startapp=${roomId}`;
+      const msg = `⚡ Conéctate a mi sala P2P para recibir el archivo de forma segura:`;
+      if (tg && tg.openTelegramLink) {
+        tg.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(shareUrl)}&text=${encodeURIComponent(msg)}`);
+      } else {
+        navigator.clipboard.writeText(shareUrl);
+        alert('Enlace de transferencia copiado.');
+      }
+    };
 
-    function showReceivedMedia(blob, meta) {
-      const container = document.getElementById('mediaContainer');
-      const viewer = document.getElementById('mediaViewer');
-      const btnDownload = document.getElementById('btnDownload');
-      container.innerHTML = '';
+    function renderReceivedMedia(blob, meta) {
+      receiverSection.style.display = 'none';
+      mediaSection.style.display = 'block';
+      mediaViewer.innerHTML = '';
       const url = URL.createObjectURL(blob);
 
       if (meta.type && meta.type.startsWith('video/')) {
-        const video = document.createElement('video');
-        video.src = url;
-        video.controls = true;
-        video.autoplay = false;
-        container.appendChild(video);
+        const vid = document.createElement('video');
+        vid.src = url;
+        vid.controls = true;
+        mediaViewer.appendChild(vid);
       } else {
         const img = document.createElement('img');
         img.src = url;
-        container.appendChild(img);
+        mediaViewer.appendChild(img);
       }
 
       btnDownload.onclick = () => {
         const a = document.createElement('a');
         a.href = url;
-        a.download = meta.name;
+        a.download = meta.name || 'descarga_p2p';
         a.click();
       };
-
-      viewer.style.display = 'block';
     }
   </script>
 </body>
