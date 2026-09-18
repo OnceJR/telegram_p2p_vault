@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>P2P Vault</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: var(--tg-theme-bg-color, #0a0e17);
+      --text: var(--tg-theme-text-color, #f1f5f9);
+      --btn-bg: var(--tg-theme-button-color, #0284c7);
+      --btn-text: var(--tg-theme-button-text-color, #ffffff);
+      --glass: rgba(255, 255, 255, 0.05);
+      --glass-border: rgba(255, 255, 255, 0.12);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 16px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+      overflow-y: auto;
+    }
+    .card {
+      background: var(--glass);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid var(--glass-border);
+      border-radius: 20px;
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+    .btn {
+      width: 100%;
+      background: var(--btn-bg);
+      color: var(--btn-text);
+      border: none;
+      padding: 14px;
+      border-radius: 12px;
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn-secondary { background: rgba(255, 255, 255, 0.15); }
+    .progress-track {
+      background: rgba(255, 255, 255, 0.08);
+      height: 8px;
+      border-radius: 4px;
+      margin: 16px 0;
+      overflow: hidden;
+    }
+    .progress-fill {
+      background: var(--btn-bg);
+      height: 100%;
+      width: 0%;
+      transition: width 0.15s ease-out;
+    }
+    .status-text {
+      font-size: 13px;
+      opacity: 0.8;
+      text-align: center;
+      margin: 4px 0;
+    }
+    #mediaViewer {
+      margin-top: 16px;
+      text-align: center;
+      display: none;
+    }
+    #mediaViewer img, #mediaViewer video {
+      max-width: 100%;
+      border-radius: 12px;
+      border: 1px solid var(--glass-border);
+    }
+  </style>
+</head>
+<body>
+
+  <div class="card">
+    <h3 style="margin-top:0;">Transferencia P2P</h3>
+    <p style="font-size: 13px; opacity: 0.7;">
+      Los archivos se leen y transmiten directamente desde tu dispositivo mediante WebRTC encriptado.
+    </p>
+
+    <input type="file" id="filePicker" style="display:none;" />
+    <button class="btn" id="btnUpload" onclick="document.getElementById('filePicker').click()">
+      1. Cargar Archivo Local
+    </button>
+    
+    <button class="btn btn-secondary" id="btnShare" style="display:none;" onclick="shareTransferLink()">
+      2. Compartir Enlace a Receptor
+    </button>
+
+    <div class="progress-track">
+      <div class="progress-fill" id="progressFill"></div>
+    </div>
+    <div class="status-text" id="statusLabel">Inicializando...</div>
+  </div>
+
+  <div class="card" id="mediaViewer">
+    <h4>Archivo Recibido</h4>
+    <div id="mediaContainer"></div>
+    <button class="btn" id="btnDownload" style="margin-top: 12px;">Descargar a Dispositivo</button>
+  </div>
+
+  <script type="module">
+    import { saveMedia } from './indexedDB.js';
+    import { P2PTransport } from './webrtc.js';
+
+    const tg = window.Telegram?.WebApp;
+    if (tg) {
+      tg.ready();
+      tg.expand();
+    }
+
+    const urlParams = new URLSearchParams(window.location.search);
+    let roomId = tg?.initDataUnsafe?.start_param || urlParams.get('tgWebAppStartParam') || urlParams.get('room');
+
+    if (!roomId) {
+      roomId = 'room_' + crypto.randomUUID().slice(0, 8);
+      history.replaceState(null, '', `?room=${roomId}`);
+    }
+
+    const progressFill = document.getElementById('progressFill');
+    const statusLabel = document.getElementById('statusLabel');
+    const btnShare = document.getElementById('btnShare');
+    let loadedFileId = null;
+
+    const p2p = new P2PTransport(roomId, {
+      onStatus: (msg) => { statusLabel.innerText = msg; },
+      onProgress: (pct) => { progressFill.style.width = `${pct}%`; },
+      onReceived: (blob, meta) => {
+        showReceivedMedia(blob, meta);
+      }
+    });
+
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    p2p.connect(`${proto}//${window.location.host}/ws/signal`);
+
+    document.getElementById('filePicker').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      loadedFileId = crypto.randomUUID();
+      await saveMedia(loadedFileId, file, { name: file.name, type: file.type, size: file.size });
+
+      statusLabel.innerText = `Cargado localmente: ${file.name}`;
+      btnShare.style.display = 'block';
+
+      if (p2p.dc && p2p.dc.readyState === 'open') {
+        p2p.sendFile(loadedFileId);
+      }
+    });
+
+    window.shareTransferLink = () => {
+      const botUser = window.TELEGRAM_BOT_USERNAME || "TuBotUsername";
+      const shareUrl = `https://t.me/${botUser}?startapp=${roomId}`;
+      const shareText = `🔒 Te envié un archivo directo por WebRTC P2P. Ábrelo aquí:`;
+      if (tg && tg.openTelegramLink) {
+        tg.openTelegramLink(`https://t.me/share/url?url=${encodeURIComponent(shareUrl)}&text=${encodeURIComponent(shareText)}`);
+      } else {
+        navigator.clipboard.writeText(shareUrl);
+        alert('Enlace copiado al portapapeles: ' + shareUrl);
+      }
+    };
+
+    function showReceivedMedia(blob, meta) {
+      const container = document.getElementById('mediaContainer');
+      const viewer = document.getElementById('mediaViewer');
+      const btnDownload = document.getElementById('btnDownload');
+      container.innerHTML = '';
+      const url = URL.createObjectURL(blob);
+
+      if (meta.type && meta.type.startsWith('video/')) {
+        const video = document.createElement('video');
+        video.src = url;
+        video.controls = true;
+        video.autoplay = false;
+        container.appendChild(video);
+      } else {
+        const img = document.createElement('img');
+        img.src = url;
+        container.appendChild(img);
+      }
+
+      btnDownload.onclick = () => {
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = meta.name;
+        a.click();
+      };
+
+      viewer.style.display = 'block';
+    }
+  </script>
+</body>
+</html>
