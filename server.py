@@ -3,6 +3,8 @@ import hashlib
 import json
 import urllib.parse
 import asyncio
+import uuid
+import time
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import CommandStart, CommandObject, Command
@@ -16,8 +18,11 @@ mongo_client = AsyncIOMotorClient(config.MONGO_URI)
 db = mongo_client["p2p_vault"]
 users_col = db["users"]
 
-# Memoria de señalización: {room_id: {user_id: {"ws": WebSocketResponse, "name": str}}}
+# Memoria volátil de señalización
 rooms: dict[str, dict[str, dict]] = {}
+
+# Memoria RAM efímera para descargas: {token: {"data": bytes, "name": str, "type": str, "expires": float}}
+ephemeral_files: dict[str, dict] = {}
 
 
 def validate_init_data(init_data: str, bot_token: str) -> dict | None:
@@ -42,7 +47,6 @@ def validate_init_data(init_data: str, bot_token: str) -> dict | None:
 
 @dp.message(CommandStart(deep_link=True))
 async def cmd_start_deeplink(message: types.Message, command: CommandObject):
-    """Maneja enlaces del tipo https://t.me/bot?start=CODIGO."""
     room_code = command.args.strip().upper()
     direct_url = f"{config.WEBAPP_URL}?room={room_code}"
     
@@ -51,7 +55,7 @@ async def cmd_start_deeplink(message: types.Message, command: CommandObject):
     
     await message.answer(
         f"🔗 **Solicitud de transferencia directa**\n\n"
-        f"Has recibido una invitación para conectarte a la sala `{room_code}`.\n\n"
+        f"Sala asignada: `{room_code}`.\n"
         f"Pulsa el botón para sincronizarte de forma segura:",
         reply_markup=kb.as_markup(),
         parse_mode="Markdown"
@@ -65,7 +69,7 @@ async def cmd_start_default(message: types.Message):
     await message.answer(
         "🔒 **Bóveda Multimedia P2P Directa**\n\n"
         "Transfiere fotos y videos encriptados de extremo a extremo sin intermediarios ni almacenamiento en servidores.\n\n"
-        "Abre la app para enviar un archivo o recibir mediante un código de sala:",
+        "Abre la app para iniciar:",
         reply_markup=kb.as_markup(),
         parse_mode="Markdown"
     )
@@ -73,11 +77,9 @@ async def cmd_start_default(message: types.Message):
 
 @dp.message(Command("sala"))
 async def cmd_join_room_text(message: types.Message, command: CommandObject):
-    """Permite unirse escribiendo /sala CODIGO."""
     if not command.args:
-        await message.answer("ℹ️ Uso: `/sala CODIGO` (Ejemplo: `/sala A8F291`)", parse_mode="Markdown")
+        await message.answer("ℹ️ Uso: `/sala CODIGO`", parse_mode="Markdown")
         return
-    
     room_code = command.args.strip().upper()
     direct_url = f"{config.WEBAPP_URL}?room={room_code}"
     kb = InlineKeyboardBuilder()
@@ -105,8 +107,6 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
             if action == "join":
                 init_data = payload.get("init_data")
                 user = validate_init_data(init_data, config.BOT_TOKEN)
-                
-                # Si initData falla (ej. testing en navegador), asignar id temporal controlado
                 current_user_id = str(user["id"]) if user else f"guest_{payload.get('user_seed', 'anon')}"
                 current_room = payload.get("room_id", "").strip().upper()
 
@@ -121,10 +121,8 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
                     "name": user.get("first_name", "Usuario") if user else "Invitado"
                 }
 
-                # Confirmación de entrada exitosa
                 await ws.send_json({"type": "joined_success", "room_id": current_room})
 
-                # Notificar a los otros miembros de la sala
                 for peer_id, peer_data in rooms[current_room].items():
                     if peer_id != current_user_id:
                         await peer_data["ws"].send_json({
@@ -163,6 +161,66 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+# --- Puente Efímero de Descarga ---
+
+async def handle_ephemeral_upload(request: web.Request) -> web.Response:
+    """Recibe temporalmente el Blob y genera un enlace válido por 60s en RAM."""
+    now = time.time()
+    # Purgar expirados
+    expired = [k for k, v in list(ephemeral_files.items()) if v["expires"] < now]
+    for k in expired:
+        ephemeral_files.pop(k, None)
+
+    reader = await request.multipart()
+    token = uuid.uuid4().hex[:16]
+    file_bytes = None
+    file_name = "archivo_descargado"
+    content_type = "application/octet-stream"
+
+    while True:
+        part = await reader.next()
+        if part is None:
+            break
+        if part.name == "file":
+            file_name = part.filename or file_name
+            content_type = part.headers.get("Content-Type", content_type)
+            file_bytes = await part.read()
+
+    if not file_bytes:
+        return web.json_response({"error": "Archivo vacío"}, status=400)
+
+    ephemeral_files[token] = {
+        "data": file_bytes,
+        "name": file_name,
+        "type": content_type,
+        "expires": time.time() + 60.0
+    }
+
+    scheme = request.headers.get("X-Forwarded-Proto", request.scheme)
+    host = request.headers.get("X-Forwarded-Host", request.host)
+    download_url = f"{scheme}://{host}/api/download/{token}"
+    
+    return web.json_response({"download_url": download_url, "file_name": file_name})
+
+
+async def handle_ephemeral_download(request: web.Request) -> web.Response:
+    """Sirve el archivo al navegador y lo destruye de la RAM al instante."""
+    token = request.match_info.get("token")
+    file_info = ephemeral_files.pop(token, None)
+
+    if not file_info or file_info["expires"] < time.time():
+        return web.Response(text="El enlace de descarga ha expirado o ya fue utilizado.", status=404)
+
+    safe_filename = urllib.parse.quote(file_info["name"])
+    headers = {
+        "Content-Disposition": f"attachment; filename*=UTF-8''{safe_filename}",
+        "Content-Type": file_info["type"],
+        "Content-Length": str(len(file_info["data"])),
+        "Cache-Control": "no-store, no-cache, must-revalidate"
+    }
+    return web.Response(body=file_info["data"], headers=headers)
+
+
 async def handle_transfer_complete(request: web.Request) -> web.Response:
     data = await request.json()
     sender_id = data.get("sender_id")
@@ -194,11 +252,18 @@ async def on_cleanup(app: web.Application):
 
 
 def create_app() -> web.Application:
-    app = web.Application()
+    # Soporta subidas en RAM de hasta 100 MB
+    app = web.Application(client_max_size=100 * 1024 * 1024)
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
+
+    # Rutas WebRTC y API
     app.router.add_get("/ws/signal", websocket_handler)
     app.router.add_post("/api/transfer-complete", handle_transfer_complete)
+    app.router.add_post("/api/ephemeral-upload", handle_ephemeral_upload)
+    app.router.add_get("/api/download/{token}", handle_ephemeral_download)
+
+    # Frontend
     app.router.add_get("/", index_handler)
     app.router.add_static("/", path="./public", name="public", show_index=False)
     return app
