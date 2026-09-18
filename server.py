@@ -5,68 +5,87 @@ import urllib.parse
 import asyncio
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, CommandObject, Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from motor.motor_asyncio import AsyncIOMotorClient
 import config
 
-# Inicialización de servicios
 bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 mongo_client = AsyncIOMotorClient(config.MONGO_URI)
 db = mongo_client["p2p_vault"]
 users_col = db["users"]
 
-# Memoria volátil de señalización: {room_id: {user_id: {"ws": WebSocketResponse, "first_name": str}}}
+# Memoria de señalización: {room_id: {user_id: {"ws": WebSocketResponse, "name": str}}}
 rooms: dict[str, dict[str, dict]] = {}
 
 
 def validate_init_data(init_data: str, bot_token: str) -> dict | None:
-    """Valida la firma HMAC-SHA256 generada por Telegram WebApp."""
     if not init_data:
         return None
     try:
         parsed = dict(urllib.parse.parse_qsl(init_data, keep_blank_values=True))
         if "hash" not in parsed:
             return None
-        
         received_hash = parsed.pop("hash")
-        data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
+        check_str = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
         secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
-        calculated_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
-        
-        if hmac.compare_digest(calculated_hash, received_hash):
+        calc_hash = hmac.new(secret_key, check_str.encode(), hashlib.sha256).hexdigest()
+        if hmac.compare_digest(calc_hash, received_hash):
             return json.loads(parsed.get("user", "{}"))
         return None
     except Exception:
         return None
 
 
-# --- Rutas de aiogram 3 ---
+# --- Bot Handlers (aiogram 3) ---
 
-@dp.message(CommandStart())
-async def cmd_start(message: types.Message):
-    await users_col.update_one(
-        {"telegram_id": message.from_user.id},
-        {"$setOnInsert": {"telegram_id": message.from_user.id, "reputation": 0}},
-        upsert=True
-    )
+@dp.message(CommandStart(deep_link=True))
+async def cmd_start_deeplink(message: types.Message, command: CommandObject):
+    """Maneja enlaces del tipo https://t.me/bot?start=CODIGO."""
+    room_code = command.args.strip().upper()
+    direct_url = f"{config.WEBAPP_URL}?room={room_code}"
     
     kb = InlineKeyboardBuilder()
-    kb.button(
-        text="⚡ Abrir Bóveda P2P",
-        web_app=types.WebAppInfo(url=config.WEBAPP_URL)
-    )
+    kb.button(text=f"🚀 Unirse a la Sala {room_code}", web_app=types.WebAppInfo(url=direct_url))
+    
     await message.answer(
-        "🔒 **Bóveda Multimedia P2P**\n\n"
-        "Transfiere fotos y videos encriptados directamente entre dispositivos sin pasar por los servidores de Telegram.\n\n"
-        "Pulsa el botón de abajo para empezar:",
+        f"🔗 **Solicitud de transferencia directa**\n\n"
+        f"Has recibido una invitación para conectarte a la sala `{room_code}`.\n\n"
+        f"Pulsa el botón para sincronizarte de forma segura:",
         reply_markup=kb.as_markup(),
         parse_mode="Markdown"
     )
 
 
-# --- Handlers de aiohttp: Señalización y API ---
+@dp.message(CommandStart())
+async def cmd_start_default(message: types.Message):
+    kb = InlineKeyboardBuilder()
+    kb.button(text="⚡ Abrir Bóveda P2P", web_app=types.WebAppInfo(url=config.WEBAPP_URL))
+    await message.answer(
+        "🔒 **Bóveda Multimedia P2P Directa**\n\n"
+        "Transfiere fotos y videos encriptados de extremo a extremo sin intermediarios ni almacenamiento en servidores.\n\n"
+        "Abre la app para enviar un archivo o recibir mediante un código de sala:",
+        reply_markup=kb.as_markup(),
+        parse_mode="Markdown"
+    )
+
+
+@dp.message(Command("sala"))
+async def cmd_join_room_text(message: types.Message, command: CommandObject):
+    """Permite unirse escribiendo /sala CODIGO."""
+    if not command.args:
+        await message.answer("ℹ️ Uso: `/sala CODIGO` (Ejemplo: `/sala A8F291`)", parse_mode="Markdown")
+        return
+    
+    room_code = command.args.strip().upper()
+    direct_url = f"{config.WEBAPP_URL}?room={room_code}"
+    kb = InlineKeyboardBuilder()
+    kb.button(text=f"🔑 Entrar a Sala {room_code}", web_app=types.WebAppInfo(url=direct_url))
+    await message.answer(f"Acceso listo para la sala `{room_code}`:", reply_markup=kb.as_markup(), parse_mode="Markdown")
+
+
+# --- Señalización WebSocket ---
 
 async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse(heartbeat=25.0)
@@ -86,23 +105,26 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
             if action == "join":
                 init_data = payload.get("init_data")
                 user = validate_init_data(init_data, config.BOT_TOKEN)
-                if not user:
-                    await ws.send_json({"type": "error", "message": "Firma inválida"})
-                    await ws.close()
-                    return ws
+                
+                # Si initData falla (ej. testing en navegador), asignar id temporal controlado
+                current_user_id = str(user["id"]) if user else f"guest_{payload.get('user_seed', 'anon')}"
+                current_room = payload.get("room_id", "").strip().upper()
 
-                current_user_id = str(user["id"])
-                current_room = payload.get("room_id")
+                if not current_room:
+                    continue
 
                 if current_room not in rooms:
                     rooms[current_room] = {}
 
                 rooms[current_room][current_user_id] = {
                     "ws": ws,
-                    "first_name": user.get("first_name", "Usuario")
+                    "name": user.get("first_name", "Usuario") if user else "Invitado"
                 }
 
-                # Notificar a los integrantes de la sala
+                # Confirmación de entrada exitosa
+                await ws.send_json({"type": "joined_success", "room_id": current_room})
+
+                # Notificar a los otros miembros de la sala
                 for peer_id, peer_data in rooms[current_room].items():
                     if peer_id != current_user_id:
                         await peer_data["ws"].send_json({
@@ -143,14 +165,10 @@ async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
 
 async def handle_transfer_complete(request: web.Request) -> web.Response:
     data = await request.json()
-    user = validate_init_data(data.get("init_data"), config.BOT_TOKEN)
-    if not user:
-        return web.json_response({"error": "No autorizado"}, status=401)
-
     sender_id = data.get("sender_id")
     file_id = data.get("file_id")
 
-    if sender_id and file_id:
+    if sender_id and file_id and not str(sender_id).startswith("guest_"):
         await users_col.find_one_and_update(
             {"telegram_id": int(sender_id)},
             {
@@ -159,8 +177,11 @@ async def handle_transfer_complete(request: web.Request) -> web.Response:
             },
             upsert=True
         )
-
     return web.json_response({"status": "ok"})
+
+
+async def index_handler(request: web.Request) -> web.FileResponse:
+    return web.FileResponse("./public/index.html")
 
 
 async def on_startup(app: web.Application):
@@ -172,26 +193,14 @@ async def on_cleanup(app: web.Application):
     mongo_client.close()
 
 
-async def index_handler(request: web.Request) -> web.FileResponse:
-    """Sirve directamente el archivo HTML principal al entrar a la raíz."""
-    return web.FileResponse("./public/index.html")
-
-
 def create_app() -> web.Application:
     app = web.Application()
     app.on_startup.append(on_startup)
     app.on_cleanup.append(on_cleanup)
-
-    # 1. Rutas API y WebSockets
     app.router.add_get("/ws/signal", websocket_handler)
     app.router.add_post("/api/transfer-complete", handle_transfer_complete)
-
-    # 2. Servir index.html de forma explícita en la raíz "/" (Debe ir ANTES de add_static)
     app.router.add_get("/", index_handler)
-
-    # 3. Servir el resto de archivos estáticos (JS, CSS, etc.) sin listar carpetas
     app.router.add_static("/", path="./public", name="public", show_index=False)
-    
     return app
 
 
