@@ -122,6 +122,7 @@
       margin-top: 10px;
     }
     .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .btn-secondary {
       background: rgba(255, 255, 255, 0.08);
       color: var(--text);
@@ -170,6 +171,12 @@
       border-radius: 12px;
       border: 1px solid var(--border);
       margin-bottom: 12px;
+    }
+    .hint-tip {
+      font-size: 12px;
+      color: var(--hint);
+      margin-top: 8px;
+      display: block;
     }
   </style>
 </head>
@@ -225,7 +232,7 @@
     </div>
   </div>
 
-  <!-- Barra de progreso común -->
+  <!-- Barra de progreso -->
   <div class="card progress-wrap" id="progressContainer">
     <div style="display: flex; justify-content: space-between; font-size: 13px;">
       <span id="transferStatus">Transmitiendo...</span>
@@ -241,6 +248,7 @@
     <h4 style="margin:0 0 10px 0; color: var(--success);">🎉 Archivo Recibido</h4>
     <div id="mediaViewer"></div>
     <button class="btn btn-success" id="btnDownload">💾 Guardar en Dispositivo</button>
+    <span class="hint-tip">💡 En móviles también puedes mantener presionada la imagen para guardarla directamente.</span>
   </div>
 
   <script type="module">
@@ -275,7 +283,7 @@
     let currentRoom = null;
     let localFileId = null;
 
-    // Instancia de transporte P2P
+    // Instancia WebRTC
     const p2p = new P2PTransport({
       onStatus: (msg, connected) => {
         statusLabel.innerText = msg;
@@ -309,7 +317,6 @@
     const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${wsProto}//${window.location.host}/ws/signal`;
 
-    // Cambiar de Pestaña
     window.switchTab = (tab) => {
       if (tab === 'send') {
         tabSendBtn.classList.add('active');
@@ -324,7 +331,6 @@
       }
     };
 
-    // Lectura de parámetros de sala por URL
     const urlParams = new URLSearchParams(window.location.search);
     const paramRoom = tg?.initDataUnsafe?.start_param || urlParams.get('room') || urlParams.get('tgWebAppStartParam');
 
@@ -338,7 +344,6 @@
       p2p.connectSignaling(wsUrl, generated);
     }
 
-    // Acción: Conectar Manualmente
     window.joinManualRoom = () => {
       const code = manualRoomInput.value.trim().toUpperCase();
       if (!code) return;
@@ -346,7 +351,6 @@
       p2p.connectSignaling(wsUrl, code);
     };
 
-    // Acción: Copiar Código
     window.copyCode = () => {
       const code = displayRoomCode.innerText;
       navigator.clipboard.writeText(code);
@@ -354,7 +358,6 @@
       alert(`Código ${code} copiado.`);
     };
 
-    // Acción: Compartir Enlace
     window.shareRoomLink = () => {
       const code = displayRoomCode.innerText;
       const shareUrl = `https://t.me/${BOT_USERNAME}?start=${code}`;
@@ -367,7 +370,6 @@
       }
     };
 
-    // Selección de archivo
     document.getElementById('filePicker').addEventListener('change', async (e) => {
       const file = e.target.files[0];
       if (!file) return;
@@ -385,7 +387,6 @@
       }
     });
 
-    // Renderizado y Descarga Robusta
     async function renderMedia(blob, meta) {
       viewReceive.style.display = 'none';
       viewSend.style.display = 'none';
@@ -415,37 +416,52 @@
       }
 
       btnDownload.onclick = async () => {
-        const file = new File([blob], fileName, { type: meta.type || 'application/octet-stream' });
+        btnDownload.disabled = true;
+        btnDownload.innerText = '⏳ Preparando descarga...';
 
-        // Prioridad móvil: Invocar menú nativo (Guardar en Galería / Archivos)
-        if (navigator.canShare && navigator.canShare({ files: [file] })) {
-          try {
-            await navigator.share({
-              files: [file],
-              title: fileName
-            });
+        try {
+          // 1. Si no estamos en Telegram (navegador web normal), descarga directa
+          if (!tg || (!tg.downloadFile && !tg.openLink)) {
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = fileName;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => document.body.removeChild(a), 200);
+            btnDownload.disabled = false;
+            btnDownload.innerText = '💾 Guardar en Dispositivo';
             return;
-          } catch (err) {
-            if (err.name !== 'AbortError') {
-              console.warn('Error en navigator.share, ejecutando fallback...', err);
-            } else {
-              return;
-            }
           }
+
+          // 2. En Telegram: Enviar a RAM efímera (60s) para obtener URL HTTPS válida
+          const formData = new FormData();
+          formData.append('file', blob, fileName);
+
+          const resp = await fetch('/api/ephemeral-upload', {
+            method: 'POST',
+            body: formData
+          });
+
+          if (!resp.ok) throw new Error('Fallo al generar enlace efímero');
+          const data = await resp.json();
+
+          // 3. Activar el gestor de descargas de Telegram o navegador del sistema
+          if (tg.downloadFile) {
+            tg.downloadFile({ url: data.download_url, file_name: data.file_name }, (accepted) => {
+              btnDownload.disabled = false;
+              btnDownload.innerText = '💾 Guardar en Dispositivo';
+            });
+          } else if (tg.openLink) {
+            tg.openLink(data.download_url);
+            btnDownload.disabled = false;
+            btnDownload.innerText = '💾 Guardar en Dispositivo';
+          }
+        } catch (err) {
+          console.error(err);
+          alert('Error al descargar: ' + err.message);
+          btnDownload.disabled = false;
+          btnDownload.innerText = '💾 Guardar en Dispositivo';
         }
-
-        // Fallback: Descarga DOM directa para Telegram Desktop y navegadores
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = fileName;
-        a.target = '_blank';
-        a.style.display = 'none';
-        document.body.appendChild(a);
-        a.click();
-
-        setTimeout(() => {
-          document.body.removeChild(a);
-        }, 200);
       };
     }
   </script>
