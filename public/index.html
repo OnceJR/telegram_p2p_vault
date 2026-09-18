@@ -7,15 +7,14 @@
   <script src="https://telegram.org/js/telegram-web-app.js"></script>
   <style>
     :root {
-      --bg: var(--tg-theme-bg-color, #0d131f);
-      --card-bg: var(--tg-theme-secondary-bg-color, #161f30);
+      --bg: var(--tg-theme-bg-color, #0a0f1d);
+      --card-bg: var(--tg-theme-secondary-bg-color, #131d31);
       --text: var(--tg-theme-text-color, #f8fafc);
       --hint: var(--tg-theme-hint-color, #94a3b8);
       --primary: var(--tg-theme-button-color, #3b82f6);
       --primary-text: var(--tg-theme-button-text-color, #ffffff);
       --success: #10b981;
       --border: rgba(255, 255, 255, 0.08);
-      --glass: rgba(255, 255, 255, 0.04);
     }
     * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
     body {
@@ -44,7 +43,6 @@
       background: var(--card-bg);
       border: 1px solid var(--border);
       font-size: 12px;
-      font-weight: 500;
     }
     .dot {
       width: 8px;
@@ -53,10 +51,7 @@
       background: #eab308;
       box-shadow: 0 0 6px #eab308;
     }
-    .dot.active { 
-      background: var(--success); 
-      box-shadow: 0 0 8px var(--success); 
-    }
+    .dot.active { background: var(--success); box-shadow: 0 0 8px var(--success); }
     .tabs-nav {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -80,7 +75,6 @@
     .tab-btn.active {
       background: var(--primary);
       color: var(--primary-text);
-      box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
     }
     .card {
       background: var(--card-bg);
@@ -122,11 +116,7 @@
       margin-top: 10px;
     }
     .btn:active { transform: scale(0.98); }
-    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .btn-secondary {
-      background: rgba(255, 255, 255, 0.08);
-      color: var(--text);
-    }
+    .btn-secondary { background: rgba(255, 255, 255, 0.08); color: var(--text); }
     .btn-success { background: var(--success); }
     .room-input {
       width: 100%;
@@ -166,17 +156,23 @@
       display: none;
       text-align: center;
     }
-    #mediaSection img, #mediaSection video {
+    #mediaViewer img, #mediaViewer video {
       max-width: 100%;
       border-radius: 12px;
       border: 1px solid var(--border);
       margin-bottom: 12px;
+      user-select: auto !important;
+      -webkit-user-select: auto !important;
     }
-    .hint-tip {
-      font-size: 12px;
+    .alert-box {
+      padding: 12px;
+      border-radius: 10px;
+      background: rgba(59, 130, 246, 0.1);
+      border: 1px solid rgba(59, 130, 246, 0.2);
+      font-size: 13px;
       color: var(--hint);
-      margin-top: 8px;
-      display: block;
+      margin-top: 12px;
+      text-align: left;
     }
   </style>
 </head>
@@ -198,9 +194,9 @@
   <!-- Vista Enviar -->
   <div id="viewSend">
     <div class="card">
-      <h3 style="margin: 0 0 6px 0;">Crear Transferencia</h3>
+      <h3 style="margin: 0 0 6px 0;">Enviar Archivo</h3>
       <p style="font-size: 13px; color: var(--hint); margin: 0;">
-        Pasa este código a tu par o comparte el link para iniciar la transferencia directa.
+        Transmisión directa P2P. Soporta cualquier peso (fotos, videos 4K, archivos de varios GB).
       </p>
 
       <div class="code-box">
@@ -209,7 +205,7 @@
       </div>
 
       <button class="btn btn-secondary" onclick="copyCode()">📋 Copiar Código</button>
-      <button class="btn btn-secondary" onclick="shareRoomLink()">🔗 Compartir Link al Chat</button>
+      <button class="btn btn-secondary" onclick="shareRoomLink()">🔗 Compartir Enlace Directo</button>
 
       <div style="margin-top: 16px; border-top: 1px solid var(--border); padding-top: 14px;">
         <input type="file" id="filePicker" style="display:none;" />
@@ -222,20 +218,20 @@
   <!-- Vista Recibir -->
   <div id="viewReceive" style="display: none;">
     <div class="card">
-      <h3 style="margin: 0 0 6px 0;">Unirse a Sala</h3>
+      <h3 style="margin: 0 0 6px 0;">Recibir Archivo</h3>
       <p style="font-size: 13px; color: var(--hint); margin: 0;">
-        Ingresa el código de 6 caracteres provisto por el emisor:
+        Introduce el código de sala generado por el emisor:
       </p>
 
       <input type="text" id="manualRoomInput" class="room-input" placeholder="EJ: 4F8A2B" maxlength="8" />
-      <button class="btn" id="btnConnectManual" onclick="joinManualRoom()">⚡ Conectar a la Sala</button>
+      <button class="btn" onclick="joinManualRoom()">⚡ Conectar a la Sala</button>
     </div>
   </div>
 
-  <!-- Barra de progreso -->
+  <!-- Barra de progreso común -->
   <div class="card progress-wrap" id="progressContainer">
     <div style="display: flex; justify-content: space-between; font-size: 13px;">
-      <span id="transferStatus">Transmitiendo...</span>
+      <span id="transferStatus">Transmitiendo datos P2P...</span>
       <b id="progressPercent">0%</b>
     </div>
     <div class="progress-bar">
@@ -245,14 +241,20 @@
 
   <!-- Visor de archivo recibido -->
   <div class="card" id="mediaSection">
-    <h4 style="margin:0 0 10px 0; color: var(--success);">🎉 Archivo Recibido</h4>
+    <h4 style="margin:0 0 10px 0; color: var(--success);">🎉 Archivo Recibido Completo</h4>
     <div id="mediaViewer"></div>
-    <button class="btn btn-success" id="btnDownload">💾 Guardar en Dispositivo</button>
-    <span class="hint-tip">💡 En móviles también puedes mantener presionada la imagen para guardarla directamente.</span>
+    
+    <button class="btn btn-success" id="btnSaveDirect">💾 Guardar en Disco / Galería</button>
+    <button class="btn btn-secondary" id="btnOpenNewTab">🌐 Abrir en Pestaña / Descarga Alternativa</button>
+
+    <div class="alert-box">
+      💡 <b>Opciones de guardado:</b><br>
+      • En <b>PC</b>: Selecciona dónde guardar en disco o usa el botón de 3 puntos del video.<br>
+      • En <b>Móvil</b>: Mantén pulsada la foto/video para guardarla directamente en tu galería.
+    </div>
   </div>
 
   <script type="module">
-    import { saveMedia } from './indexedDB.js';
     import { P2PTransport } from './webrtc.js';
 
     const tg = window.Telegram?.WebApp;
@@ -277,13 +279,13 @@
     const progressPercent = document.getElementById('progressPercent');
     const mediaSection = document.getElementById('mediaSection');
     const mediaViewer = document.getElementById('mediaViewer');
-    const btnDownload = document.getElementById('btnDownload');
+    const btnSaveDirect = document.getElementById('btnSaveDirect');
+    const btnOpenNewTab = document.getElementById('btnOpenNewTab');
     const selectedFileInfo = document.getElementById('selectedFileInfo');
 
     let currentRoom = null;
-    let localFileId = null;
+    let selectedFile = null;
 
-    // Instancia WebRTC
     const p2p = new P2PTransport({
       onStatus: (msg, connected) => {
         statusLabel.innerText = msg;
@@ -299,8 +301,8 @@
         displayRoomCode.innerText = room;
       },
       onChannelReady: () => {
-        if (localFileId) {
-          p2p.sendFile(localFileId);
+        if (selectedFile) {
+          startSending();
         }
       },
       onProgress: (pct) => {
@@ -308,9 +310,9 @@
         progressFill.style.width = `${pct}%`;
         progressPercent.innerText = `${pct.toFixed(0)}%`;
       },
-      onReceived: (blob, meta) => {
+      onReceived: (file, meta) => {
         progressContainer.style.display = 'none';
-        renderMedia(blob, meta);
+        renderReceivedFile(file, meta);
       }
     });
 
@@ -331,6 +333,7 @@
       }
     };
 
+    // Parámetros de sala por URL
     const urlParams = new URLSearchParams(window.location.search);
     const paramRoom = tg?.initDataUnsafe?.start_param || urlParams.get('room') || urlParams.get('tgWebAppStartParam');
 
@@ -355,7 +358,7 @@
       const code = displayRoomCode.innerText;
       navigator.clipboard.writeText(code);
       if (tg?.HapticFeedback) tg.HapticFeedback.notificationOccurred('success');
-      alert(`Código ${code} copiado.`);
+      alert(`Código de sala ${code} copiado.`);
     };
 
     window.shareRoomLink = () => {
@@ -370,98 +373,100 @@
       }
     };
 
-    document.getElementById('filePicker').addEventListener('change', async (e) => {
+    // Selección de archivo en streaming
+    document.getElementById('filePicker').addEventListener('change', (e) => {
       const file = e.target.files[0];
       if (!file) return;
 
-      localFileId = crypto.randomUUID();
-      await saveMedia(localFileId, file, { name: file.name, type: file.type, size: file.size });
-
-      selectedFileInfo.innerText = `📄 ${file.name} (${(file.size / 1024).toFixed(1)} KB)`;
+      selectedFile = file;
+      const sizeMb = (file.size / (1024 * 1024)).toFixed(2);
+      selectedFileInfo.innerText = `📄 ${file.name} (${sizeMb} MB)`;
       selectedFileInfo.style.display = 'block';
 
       if (tg?.HapticFeedback) tg.HapticFeedback.impactOccurred('light');
 
       if (p2p.isChannelReady()) {
-        p2p.sendFile(localFileId);
+        startSending();
       }
     });
 
-    async function renderMedia(blob, meta) {
+    function startSending() {
+      progressContainer.style.display = 'block';
+      p2p.sendFileStream(selectedFile, (pct) => {
+        progressFill.style.width = `${pct}%`;
+        progressPercent.innerText = `${pct.toFixed(0)}%`;
+      });
+    }
+
+    // Renderizado y Descarga Robusta Multi-Plataforma
+    function renderReceivedFile(file, meta) {
       viewReceive.style.display = 'none';
       viewSend.style.display = 'none';
       mediaSection.style.display = 'block';
       mediaViewer.innerHTML = '';
 
-      const url = URL.createObjectURL(blob);
-      const fileName = meta.name || 'archivo_p2p';
+      const objectUrl = URL.createObjectURL(file);
+      const isVideo = meta.type.startsWith('video/');
+      const isImage = meta.type.startsWith('image/');
 
-      if (meta.type && meta.type.startsWith('video/')) {
+      if (isVideo) {
         const vid = document.createElement('video');
-        vid.src = url;
+        vid.src = objectUrl;
         vid.controls = true;
         vid.playsInline = true;
         mediaViewer.appendChild(vid);
-      } else if (meta.type && meta.type.startsWith('image/')) {
+      } else if (isImage) {
         const img = document.createElement('img');
-        img.src = url;
+        img.src = objectUrl;
         mediaViewer.appendChild(img);
       } else {
-        const docInfo = document.createElement('div');
-        docInfo.style.padding = '15px';
-        docInfo.style.background = 'rgba(255,255,255,0.05)';
-        docInfo.style.borderRadius = '10px';
-        docInfo.innerHTML = `📄 <b>${fileName}</b><br><small style="color:var(--hint);">${(meta.size / 1024).toFixed(1)} KB</small>`;
-        mediaViewer.appendChild(docInfo);
+        const doc = document.createElement('div');
+        doc.style.padding = '16px';
+        doc.style.background = 'rgba(255,255,255,0.05)';
+        doc.style.borderRadius = '12px';
+        doc.innerHTML = `📄 <b>${meta.name}</b><br><small style="color:var(--hint);">${(meta.size / (1024 * 1024)).toFixed(2)} MB</small>`;
+        mediaViewer.appendChild(doc);
       }
 
-      btnDownload.onclick = async () => {
-        btnDownload.disabled = true;
-        btnDownload.innerText = '⏳ Preparando descarga...';
-
-        try {
-          // 1. Si no estamos en Telegram (navegador web normal), descarga directa
-          if (!tg || (!tg.downloadFile && !tg.openLink)) {
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = fileName;
-            document.body.appendChild(a);
-            a.click();
-            setTimeout(() => document.body.removeChild(a), 200);
-            btnDownload.disabled = false;
-            btnDownload.innerText = '💾 Guardar en Dispositivo';
+      // 1. Guardar directo en disco (Chromium / PC / Mobile)
+      btnSaveDirect.onclick = async () => {
+        // A. File System Access API: Permite elegir la carpeta y escribir directo a disco
+        if ('showSaveFilePicker' in window) {
+          try {
+            const handle = await window.showSaveFilePicker({ suggestedName: meta.name });
+            const writable = await handle.createWritable();
+            await file.stream().pipeTo(writable);
+            alert('✅ Archivo guardado correctamente en tu disco.');
             return;
+          } catch (err) {
+            if (err.name === 'AbortError') return;
+            console.warn('showSaveFilePicker falló, probando alternativa...', err);
           }
-
-          // 2. En Telegram: Enviar a RAM efímera (60s) para obtener URL HTTPS válida
-          const formData = new FormData();
-          formData.append('file', blob, fileName);
-
-          const resp = await fetch('/api/ephemeral-upload', {
-            method: 'POST',
-            body: formData
-          });
-
-          if (!resp.ok) throw new Error('Fallo al generar enlace efímero');
-          const data = await resp.json();
-
-          // 3. Activar el gestor de descargas de Telegram o navegador del sistema
-          if (tg.downloadFile) {
-            tg.downloadFile({ url: data.download_url, file_name: data.file_name }, (accepted) => {
-              btnDownload.disabled = false;
-              btnDownload.innerText = '💾 Guardar en Dispositivo';
-            });
-          } else if (tg.openLink) {
-            tg.openLink(data.download_url);
-            btnDownload.disabled = false;
-            btnDownload.innerText = '💾 Guardar en Dispositivo';
-          }
-        } catch (err) {
-          console.error(err);
-          alert('Error al descargar: ' + err.message);
-          btnDownload.disabled = false;
-          btnDownload.innerText = '💾 Guardar en Dispositivo';
         }
+
+        // B. Web Share API: Para móviles (Android/iOS)
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+          try {
+            await navigator.share({ files: [file], title: meta.name });
+            return;
+          } catch (err) {
+            if (err.name !== 'AbortError') console.warn('Share API falló:', err);
+            else return;
+          }
+        }
+
+        // C. Fallback a enlace DOM estándar
+        const a = document.createElement('a');
+        a.href = objectUrl;
+        a.download = meta.name;
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => document.body.removeChild(a), 500);
+      };
+
+      // 2. Abrir en pestaña/visor alternativo si el sandbox bloquea la acción
+      btnOpenNewTab.onclick = () => {
+        window.open(objectUrl, '_blank');
       };
     }
   </script>
