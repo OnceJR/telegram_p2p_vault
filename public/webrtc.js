@@ -9,6 +9,7 @@ export class P2PTransport {
     this.onStatus = callbacks.onStatus || (() => {});
     this.onProgress = callbacks.onProgress || (() => {});
     this.onReceived = callbacks.onReceived || (() => {});
+    this.onReadyToSend = callbacks.onReadyToSend || (() => {});
 
     this.pc = null;
     this.dc = null;
@@ -20,11 +21,15 @@ export class P2PTransport {
     this.receivedSize = 0;
   }
 
+  isChannelReady() {
+    return this.dc && this.dc.readyState === 'open';
+  }
+
   connect(wsUrl) {
     this.ws = new WebSocket(wsUrl);
 
     this.ws.onopen = () => {
-      this.onStatus('Conectado al servidor. Esperando par...');
+      this.onStatus('Esperando par en la sala...', false);
       this.ws.send(JSON.stringify({
         action: 'join',
         room_id: this.roomId,
@@ -34,8 +39,10 @@ export class P2PTransport {
 
     this.ws.onmessage = async (event) => {
       const msg = JSON.parse(event.data);
+
       if (msg.type === 'peer_joined') {
         this.targetPeerId = msg.peer_id;
+        this.onStatus('Par detectado. Negociando WebRTC...', false);
         this.initPeer(msg.initiator);
       } else if (msg.type === 'offer') {
         await this.handleOffer(msg.data, msg.sender_id);
@@ -44,16 +51,15 @@ export class P2PTransport {
       } else if (msg.type === 'candidate' && this.pc) {
         await this.pc.addIceCandidate(new RTCIceCandidate(msg.data));
       } else if (msg.type === 'peer_left') {
-        this.onStatus('El otro usuario se ha desconectado.');
+        this.onStatus('El par se ha desconectado.', false);
         this.cleanupPC();
       }
     };
 
-    this.ws.onclose = () => this.onStatus('Conexión con señalización cerrada.');
+    this.ws.onclose = () => this.onStatus('Desconectado', false);
   }
 
   initPeer(isInitiator) {
-    this.onStatus('Estableciendo enlace directo P2P...');
     this.pc = new RTCPeerConnection({
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
@@ -110,8 +116,12 @@ export class P2PTransport {
     dc.binaryType = 'arraybuffer';
     dc.bufferedAmountLowThreshold = BUFFER_CEILING;
 
-    dc.onopen = () => this.onStatus('⚡ Conexión P2P encriptada activa.');
-    dc.onclose = () => this.onStatus('Canal P2P cerrado.');
+    dc.onopen = () => {
+      this.onStatus('P2P Conectado', true);
+      this.onReadyToSend();
+    };
+
+    dc.onclose = () => this.onStatus('Canal P2P cerrado', false);
 
     dc.onmessage = async (e) => {
       if (typeof e.data === 'string') {
@@ -120,12 +130,12 @@ export class P2PTransport {
           this.incomingMeta = payload.meta;
           this.receivedChunks = [];
           this.receivedSize = 0;
-          this.onStatus(`Recibiendo: ${payload.meta.name}...`);
+          this.onStatus(`Recibiendo: ${payload.meta.name}`, true);
         } else if (payload.event === 'COMPLETE') {
           const completeBlob = new Blob(this.receivedChunks, { type: this.incomingMeta.type });
           await saveMedia(this.incomingMeta.id, completeBlob, this.incomingMeta);
 
-          // Notificar recompensa al backend
+          // Notificar al backend para reputación
           fetch('/api/transfer-complete', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -137,10 +147,9 @@ export class P2PTransport {
           });
 
           this.onReceived(completeBlob, this.incomingMeta);
-          this.onStatus('✅ Archivo transferido con éxito.');
+          this.onStatus('Completado', true);
         }
       } else {
-        // Paquete de datos binarios
         this.receivedChunks.push(e.data);
         this.receivedSize += e.data.byteLength;
         if (this.incomingMeta?.size) {
@@ -152,10 +161,7 @@ export class P2PTransport {
 
   async sendFile(fileId) {
     const record = await getMedia(fileId);
-    if (!record || !this.dc || this.dc.readyState !== 'open') {
-      this.onStatus('Error: Canal P2P no disponible.');
-      return;
-    }
+    if (!record || !this.isChannelReady()) return;
 
     const meta = {
       id: record.id,
@@ -186,7 +192,7 @@ export class P2PTransport {
       }
 
       this.dc.send(JSON.stringify({ event: 'COMPLETE' }));
-      this.onStatus('✅ Envío finalizado.');
+      this.onStatus('Enviado con éxito', true);
     };
 
     pump();
